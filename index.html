@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Wavo</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0d12; overflow: hidden; touch-action: none;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    font-family: system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; color: #e8ecf4; }
+  canvas { display: block; position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  #hud { position: fixed; left: 16px; top: 14px; pointer-events: none; font-size: 14px; }
+  #hpbar { width: 200px; height: 10px; border-radius: 5px; background: rgba(255,255,255,.12); overflow: hidden; margin-bottom: 6px; }
+  #hp { height: 100%; width: 100%; background: #5cd0ff; transition: width .15s; }
+  #info { color: #aab2c3; }
+  #keys { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; gap: 8px; pointer-events: none; }
+  .k { padding: 6px 12px; border-radius: 8px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.14);
+    font-size: 13px; color: #c3c9d6; white-space: nowrap; transition: background .08s, border-color .08s; }
+  .k b { color: #fff; margin-right: 6px; }
+  .k.on { background: rgba(92,208,255,.25); border-color: #5cd0ff; }
+  #move { position: fixed; left: 50%; bottom: 52px; transform: translateX(-50%); font-size: 12px; color: #6f7890; pointer-events: none; white-space: nowrap; }
+  #over { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px;
+    background: rgba(4,5,9,.7); text-align: center; }
+  #over.show { display: flex; }
+  #over h2 { margin: 0; font-size: 40px; letter-spacing: .08em; }
+  #over p { margin: 0; color: #aab2c3; }
+  #tb { display: none; position: fixed; right: 16px; bottom: 20px; width: 190px; height: 170px; }
+  body.touch #tb { display: block; }
+  body.touch #keys, body.touch #move { display: none; }
+  .tbtn { position: absolute; width: 68px; height: 68px; border-radius: 50%; border: 2px solid rgba(255,255,255,.28);
+    background: rgba(255,255,255,.08); color: #fff; font: 800 13px/1.1 inherit; font-family: inherit; touch-action: none; }
+  .tbtn:active { background: rgba(92,208,255,.3); }
+  #b1 { left: 0; bottom: 0; } #b2 { right: 0; bottom: 0; } #b3 { left: 61px; top: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="hpbar"><div id="hp"></div></div><div id="info"></div></div>
+<div id="move">WASD / 방향키 이동 · 마우스 조준</div>
+<div id="keys">
+  <div class="k" id="k1"><b>1</b>베기</div>
+  <div class="k" id="k2"><b>2</b>반대 베기</div>
+  <div class="k" id="k3"><b>3</b>찌르기</div>
+</div>
+<div id="tb">
+  <button class="tbtn" id="b1">1<br>베기</button>
+  <button class="tbtn" id="b2">2<br>반대</button>
+  <button class="tbtn" id="b3">3<br>찌르기</button>
+</div>
+<div id="over"><h2>패배</h2><p id="overInfo"></p><p>R 키 또는 화면을 눌러 다시 시작</p></div>
+<script>
+'use strict';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const TAU = Math.PI * 2;
+let W = 0, H = 0;
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = t => 1 - (1 - t) * (1 - t) * (1 - t);
+const easeInOut = t => t < .5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+const angDiff = (a, b) => { let d = (b - a) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return d; };
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+// 칼 자세: s = 손잡이 위치 각도(정면 기준), a = 칼날 각도(정면 기준), d = 손잡이를 몸 밖으로 내민 거리
+// 캔버스 좌표는 y가 아래라서 +각도 = 캐릭터의 오른쪽
+const IDLE = { s: 1.25, a: -0.25, d: 0 };
+const ATK = {
+  1: { name: '베기',      start: { s:  2.0, a:  2.0, d: 0 }, end: { s: -2.0, a: -2.0, d: 0 },  wind: .07, strike: .13, rec: .16, dmg: 25, kb: 260 },
+  2: { name: '반대 베기', start: { s: -2.0, a: -2.0, d: 0 }, end: { s:  2.0, a:  2.0, d: 0 },  wind: .07, strike: .13, rec: .16, dmg: 25, kb: 260 },
+  3: { name: '찌르기',    start: { s: .35,  a: 0,    d: -10 }, end: { s: 0,  a: 0,    d: 36 }, wind: .09, strike: .08, rec: .2,  dmg: 40, kb: 380 },
+};
+const lerpP = (p, q, t) => ({ s: lerp(p.s, q.s, t), a: lerp(p.a, q.a, t), d: lerp(p.d, q.d, t) });
+
+function makeChar(o) {
+  return Object.assign({ x: 0, y: 0, vx: 0, vy: 0, r: 18, L: 58, face: 0, hp: 100, maxHp: 100,
+    atk: null, queued: 0, cd: 0, flash: 0, inv: 0, trail: [], windMul: 1, dmgMul: 1 }, o);
+}
+
+let player, enemies, particles, texts, wave, kills, shake, hitstop, over;
+
+function reset() {
+  player = makeChar({ x: W / 2, y: H / 2, color: '#5cd0ff', isPlayer: true, speed: 230 });
+  enemies = []; particles = []; texts = [];
+  wave = 0; kills = 0; shake = 0; hitstop = 0; over = false;
+  document.getElementById('over').classList.remove('show');
+  nextWave();
+}
+
+function nextWave() {
+  wave++;
+  const n = 2 + wave;
+  for (let i = 0; i < n; i++) {
+    let x, y;
+    do { x = rnd(40, W - 40); y = rnd(40, H - 40); } while (Math.hypot(x - player.x, y - player.y) < 260);
+    enemies.push(makeChar({ x, y, r: 16, L: 50, color: '#ff5d6c', hp: 50 + wave * 5, maxHp: 50 + wave * 5,
+      speed: rnd(80, 110) + wave * 4, windMul: 4, dmgMul: .45, cd: rnd(.6, 1.6), face: Math.atan2(player.y - y, player.x - x) }));
+  }
+  texts.push({ x: W / 2, y: H / 2 - 80, s: 'WAVE ' + wave, life: 1.2, max: 1.2, big: true, color: '#ffd84a' });
+}
+
+// 칼의 월드 좌표 (손잡이 → 칼끝)
+function worldPose(c, p) {
+  const ha = c.face + p.s, hd = c.r + 4 + p.d;
+  const hx = c.x + Math.cos(ha) * hd, hy = c.y + Math.sin(ha) * hd;
+  const ang = c.face + p.a;
+  return { hx, hy, ang, tx: hx + Math.cos(ang) * c.L, ty: hy + Math.sin(ang) * c.L };
+}
+function currentPose(c) {
+  const A = c.atk;
+  if (!A) return worldPose(c, IDLE);
+  const k = ATK[A.k], wind = k.wind * c.windMul;
+  let p;
+  if (A.t < wind) p = lerpP(IDLE, k.start, easeOut(A.t / wind));
+  else if (A.t < wind + k.strike) p = lerpP(k.start, k.end, easeOut((A.t - wind) / k.strike));
+  else p = lerpP(k.end, IDLE, easeInOut(clamp((A.t - wind - k.strike) / k.rec, 0, 1)));
+  return worldPose(c, p);
+}
+
+function startAttack(c, k) {
+  c.atk = { k, t: 0, hit: new Set() };
+  c.trail = [];
+}
+function tryAttack(c, k) {
+  if (!c.atk) { startAttack(c, k); return; }
+  const K = ATK[c.atk.k];
+  // 후딜레이 중이면 바로 다음 공격으로 캔슬, 아니면 예약
+  if (c.atk.t >= K.wind * c.windMul + K.strike) startAttack(c, k);
+  else c.queued = k;
+}
+
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  const t = l2 ? clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0, 1) : 0;
+  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+}
+
+function updateAttack(c, dt, targets) {
+  const A = c.atk; if (!A) return;
+  const k = ATK[A.k], wind = k.wind * c.windMul;
+  const t0 = A.t; A.t += dt;
+  const u0 = clamp((t0 - wind) / k.strike, 0, 1), u1 = clamp((A.t - wind) / k.strike, 0, 1);
+  if (u1 > u0) {
+    const n = 6;
+    for (let i = 1; i <= n; i++) {
+      const P = worldPose(c, lerpP(k.start, k.end, easeOut(lerp(u0, u1, i / n))));
+      c.trail.push({ ...P, age: 0 });
+      for (const tg of targets) {
+        if (tg.hp <= 0 || A.hit.has(tg) || tg.inv > 0) continue;
+        if (segDist(tg.x, tg.y, P.hx, P.hy, P.tx, P.ty) < tg.r + 2) { A.hit.add(tg); hit(c, tg, k, P); }
+      }
+    }
+  }
+  if (A.t >= wind + k.strike + k.rec) {
+    c.atk = null;
+    if (c.queued) { const q = c.queued; c.queued = 0; startAttack(c, q); }
+  }
+}
+
+function hit(src, tg, k, P) {
+  const dmg = Math.round(k.dmg * src.dmgMul * rnd(.9, 1.1));
+  tg.hp -= dmg; tg.flash = .12;
+  const a = Math.atan2(tg.y - src.y, tg.x - src.x);
+  tg.vx += Math.cos(a) * k.kb; tg.vy += Math.sin(a) * k.kb;
+  if (tg.atk && !tg.isPlayer) { tg.atk = null; tg.cd = .5; } // 적은 맞으면 공격이 끊김
+  if (tg.isPlayer) { tg.inv = .6; shake = Math.max(shake, 9); }
+  else { hitstop = Math.max(hitstop, A_HITSTOP[k === ATK[3] ? 1 : 0]); shake = Math.max(shake, 5); }
+  const sx = lerp(P.hx, P.tx, .7), sy = lerp(P.hy, P.ty, .7);
+  for (let i = 0; i < 10; i++) {
+    const pa = a + rnd(-.9, .9), sp = rnd(120, 360);
+    particles.push({ x: sx, y: sy, vx: Math.cos(pa) * sp, vy: Math.sin(pa) * sp, life: rnd(.2, .4), max: .4,
+      color: tg.isPlayer ? '#ff5d6c' : '#ffe9a8' });
+  }
+  texts.push({ x: tg.x, y: tg.y - tg.r - 6, s: '' + dmg, life: .7, max: .7, color: tg.isPlayer ? '#ff8a95' : '#fff' });
+  if (tg.hp <= 0 && !tg.isPlayer) {
+    kills++;
+    for (let i = 0; i < 18; i++) {
+      const pa = rnd(0, TAU), sp = rnd(60, 260);
+      particles.push({ x: tg.x, y: tg.y, vx: Math.cos(pa) * sp, vy: Math.sin(pa) * sp, life: rnd(.3, .6), max: .6, color: tg.color });
+    }
+  }
+}
+const A_HITSTOP = [.045, .07];
+
+// ---------- 입력 ----------
+const keys = {};
+const mouse = { x: 0, y: 0, used: false };
+const KEYMAP = { Digit1: 1, Numpad1: 1, Digit2: 2, Numpad2: 2, Digit3: 3, Numpad3: 3 };
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (KEYMAP[e.code] && !e.repeat && !over) { tryAttack(player, KEYMAP[e.code]); pulse(KEYMAP[e.code]); }
+  if (e.code === 'KeyR' && over) reset();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; mouse.used = true; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+function pulse(k) {
+  const el = document.getElementById('k' + k);
+  el.classList.add('on'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), 120);
+}
+
+// 터치: 왼쪽 드래그 = 이동 조이스틱, 오른쪽 버튼 = 공격 (가장 가까운 적 자동 조준)
+const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
+addEventListener('touchstart', () => document.body.classList.add('touch'), { once: true, passive: true });
+cv.addEventListener('pointerdown', e => {
+  if (over) { reset(); return; }
+  if (e.pointerType === 'mouse') return;
+  if (joy.id === null) { joy.id = e.pointerId; joy.ox = joy.x = e.clientX; joy.oy = joy.y = e.clientY; }
+});
+cv.addEventListener('pointermove', e => { if (e.pointerId === joy.id) { joy.x = e.clientX; joy.y = e.clientY; } });
+const joyEnd = e => { if (e.pointerId === joy.id) joy.id = null; };
+cv.addEventListener('pointerup', joyEnd); cv.addEventListener('pointercancel', joyEnd);
+for (const k of [1, 2, 3]) {
+  document.getElementById('b' + k).addEventListener('pointerdown', e => { e.preventDefault(); if (!over) tryAttack(player, k); });
+}
+document.getElementById('over').addEventListener('pointerdown', () => { if (over) reset(); });
+
+// ---------- 업데이트 ----------
+function inStrike(c) {
+  if (!c.atk) return false;
+  const k = ATK[c.atk.k], w = k.wind * c.windMul;
+  return c.atk.t >= w && c.atk.t < w + k.strike;
+}
+
+function moveChar(c, mx, my, dt) {
+  c.x += (mx + c.vx) * dt; c.y += (my + c.vy) * dt;
+  const f = Math.exp(-9 * dt); c.vx *= f; c.vy *= f;
+  c.x = clamp(c.x, c.r, W - c.r); c.y = clamp(c.y, c.r, H - c.r);
+}
+
+function update(dt) {
+  const alive = enemies.filter(e => e.hp > 0);
+
+  // 플레이어
+  let mx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  let my = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  if (joy.id !== null) {
+    const dx = joy.x - joy.ox, dy = joy.y - joy.oy, l = Math.hypot(dx, dy);
+    if (l > 8) { mx = dx / Math.max(l, 50); my = dy / Math.max(l, 50); }
+  }
+  const ml = Math.hypot(mx, my);
+  if (ml > 1) { mx /= ml; my /= ml; }
+  const slow = player.atk ? .45 : 1;
+  moveChar(player, mx * player.speed * slow, my * player.speed * slow, dt);
+
+  if (!inStrike(player)) {
+    let target = null;
+    if (mouse.used && !document.body.classList.contains('touch')) target = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+    else {
+      let best = 280, near = null;
+      for (const e of alive) { const d = Math.hypot(e.x - player.x, e.y - player.y); if (d < best) { best = d; near = e; } }
+      if (near) target = Math.atan2(near.y - player.y, near.x - player.x);
+      else if (ml > .1) target = Math.atan2(my, mx);
+    }
+    if (target !== null) player.face += angDiff(player.face, target) * Math.min(1, dt * 25);
+  }
+  updateAttack(player, dt, alive);
+
+  // 적
+  for (const e of alive) {
+    const dx = player.x - e.x, dy = player.y - e.y, d = Math.hypot(dx, dy);
+    const toP = Math.atan2(dy, dx);
+    const windup = e.atk && e.atk.t < ATK[e.atk.k].wind * e.windMul;
+    if (!inStrike(e)) e.face += angDiff(e.face, toP) * Math.min(1, dt * (windup ? 3 : 8));
+    const range = e.r + e.L + player.r - 4;
+    let emx = 0, emy = 0;
+    if (!e.atk) {
+      if (d > range * .8) { emx = dx / d * e.speed; emy = dy / d * e.speed; }
+      else { emx = -dy / d * e.speed * .4; emy = dx / d * e.speed * .4; } // 가까우면 옆으로 돈다
+      e.cd -= dt;
+      if (d < range && e.cd <= 0 && player.hp > 0) { startAttack(e, 1 + (Math.random() * 3 | 0)); e.cd = rnd(1, 1.8); }
+    }
+    moveChar(e, emx, emy, dt);
+    updateAttack(e, dt, [player]);
+  }
+
+  // 서로 겹치지 않게 밀어내기
+  const all = [player, ...alive];
+  for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+    const a = all[i], b = all[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || .01, o = a.r + b.r - d;
+    if (o > 0) { const px = dx / d * o / 2, py = dy / d * o / 2; a.x -= px; a.y -= py; b.x += px; b.y += py; }
+  }
+
+  for (const c of all) {
+    c.flash = Math.max(0, c.flash - dt); c.inv = Math.max(0, c.inv - dt);
+    for (const t of c.trail) t.age += dt;
+    c.trail = c.trail.filter(t => t.age < .16);
+  }
+  for (const e of enemies) if (e.hp <= 0) { e.dead = (e.dead || 0) + dt; }
+  enemies = enemies.filter(e => !(e.dead > .25));
+
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= .9; p.vy *= .9; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+  for (const t of texts) { t.life -= dt; if (!t.big) t.y -= 40 * dt; }
+  texts = texts.filter(t => t.life > 0);
+  shake = Math.max(0, shake - dt * 40);
+
+  if (player.hp <= 0 && !over) {
+    over = true; player.atk = null;
+    document.getElementById('overInfo').textContent = `WAVE ${wave} · 처치 ${kills}`;
+    document.getElementById('over').classList.add('show');
+  }
+  if (!over && enemies.length === 0) nextWave();
+}
+
+// ---------- 그리기 ----------
+function drawKatana(P, L) {
+  ctx.save();
+  ctx.translate(P.hx, P.hy); ctx.rotate(P.ang);
+  // 손잡이
+  ctx.fillStyle = '#20150f';
+  ctx.fillRect(-15, -2.6, 15, 5.2);
+  ctx.strokeStyle = '#6b4b33'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = -13; x < 0; x += 4) { ctx.moveTo(x, -2.6); ctx.lineTo(x + 2, 2.6); ctx.moveTo(x + 2, -2.6); ctx.lineTo(x, 2.6); }
+  ctx.stroke();
+  // 칼날 (살짝 휜 모양)
+  const g = ctx.createLinearGradient(0, -4, 0, 2);
+  g.addColorStop(0, '#f4f7fb'); g.addColorStop(1, '#9aa4b4');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(2, -1.8);
+  ctx.quadraticCurveTo(L * .55, -3, L - 8, -4.2);
+  ctx.quadraticCurveTo(L - 2, -4.8, L, -5.6);
+  ctx.quadraticCurveTo(L - 4, -1.2, L - 9, -.2);
+  ctx.quadraticCurveTo(L * .55, 1.4, 2, 1.8);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = .8;
+  ctx.beginPath(); ctx.moveTo(4, .6); ctx.quadraticCurveTo(L * .55, 0, L - 9, -1.8); ctx.stroke();
+  // 코등이
+  ctx.fillStyle = '#c9a24a';
+  ctx.beginPath(); ctx.ellipse(0, 0, 2.2, 6.2, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function drawTrail(c) {
+  const tr = c.trail; if (tr.length < 2) return;
+  const col = c.isPlayer ? '180,230,255' : '255,150,160';
+  for (let i = 1; i < tr.length; i++) {
+    const a = tr[i - 1], b = tr[i], al = (1 - b.age / .16) * .45;
+    ctx.fillStyle = `rgba(${col},${al})`;
+    ctx.beginPath();
+    ctx.moveTo(lerp(a.hx, a.tx, .3), lerp(a.hy, a.ty, .3)); ctx.lineTo(a.tx, a.ty);
+    ctx.lineTo(b.tx, b.ty); ctx.lineTo(lerp(b.hx, b.tx, .3), lerp(b.hy, b.ty, .3));
+    ctx.closePath(); ctx.fill();
+  }
+  // 찌르기처럼 궤적이 일직선일 때도 보이도록 칼끝 선
+  ctx.strokeStyle = `rgba(${col},.5)`; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(tr[0].tx, tr[0].ty);
+  for (const t of tr) ctx.lineTo(t.tx, t.ty);
+  ctx.stroke();
+}
+
+function drawChar(c) {
+  const fade = c.hp <= 0 ? 1 - (c.dead || 0) / .25 : 1;
+  ctx.globalAlpha = clamp(fade, 0, 1) * (c.inv > 0 && Math.floor(c.inv * 20) % 2 ? .45 : 1);
+
+  // 적의 공격 예고: 준비 동작 중 공격 범위 표시
+  if (!c.isPlayer && c.atk && c.atk.t < ATK[c.atk.k].wind * c.windMul) {
+    const k = c.atk.k, p = c.atk.t / (ATK[k].wind * c.windMul), R = c.r + 4 + c.L + (k === 3 ? 36 : 0);
+    ctx.fillStyle = `rgba(255,80,90,${.08 + p * .12})`;
+    ctx.beginPath();
+    if (k === 3) {
+      ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.face); ctx.rect(0, -7, R, 14); ctx.restore();
+    } else { ctx.moveTo(c.x, c.y); ctx.arc(c.x, c.y, R, c.face - 2, c.face + 2); ctx.closePath(); }
+    ctx.fill();
+  }
+
+  drawTrail(c);
+  ctx.fillStyle = 'rgba(0,0,0,.3)';
+  ctx.beginPath(); ctx.arc(c.x + 3, c.y + 4, c.r, 0, TAU); ctx.fill();
+  ctx.fillStyle = c.flash > 0 ? '#fff' : c.color;
+  ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, TAU); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 2; ctx.stroke();
+  if (c.hp > 0 || c.isPlayer) drawKatana(currentPose(c), c.L);
+
+  if (!c.isPlayer && c.hp > 0 && c.hp < c.maxHp) {
+    ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(c.x - 16, c.y - c.r - 10, 32, 4);
+    ctx.fillStyle = '#ff5d6c'; ctx.fillRect(c.x - 16, c.y - c.r - 10, 32 * c.hp / c.maxHp, 4);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  ctx.fillStyle = '#0b0d12'; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  if (shake > 0) ctx.translate(rnd(-shake, shake) * .5, rnd(-shake, shake) * .5);
+  ctx.strokeStyle = 'rgba(255,255,255,.04)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x < W; x += 48) { ctx.moveTo(x + .5, 0); ctx.lineTo(x + .5, H); }
+  for (let y = 0; y < H; y += 48) { ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); }
+  ctx.stroke();
+
+  for (const e of enemies) drawChar(e);
+  if (player.hp > 0) drawChar(player);
+
+  for (const p of particles) {
+    ctx.globalAlpha = clamp(p.life / p.max, 0, 1); ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'center';
+  for (const t of texts) {
+    ctx.globalAlpha = clamp(t.life / t.max * 2, 0, 1);
+    ctx.fillStyle = t.color;
+    ctx.font = t.big ? '900 42px system-ui, sans-serif' : '700 15px system-ui, sans-serif';
+    ctx.fillText(t.s, t.x, t.y);
+  }
+  ctx.globalAlpha = 1;
+
+  if (joy.id !== null) {
+    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 50, 0, TAU); ctx.stroke();
+    const dx = joy.x - joy.ox, dy = joy.y - joy.oy, l = Math.hypot(dx, dy), s = l > 50 ? 50 / l : 1;
+    ctx.fillStyle = 'rgba(255,255,255,.25)';
+    ctx.beginPath(); ctx.arc(joy.ox + dx * s, joy.oy + dy * s, 20, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+
+  document.getElementById('hp').style.width = Math.max(0, player.hp) + '%';
+  document.getElementById('info').textContent = `WAVE ${wave} · 처치 ${kills}`;
+}
+
+let last = performance.now();
+function frame(now) {
+  let dt = Math.min(.033, (now - last) / 1000); last = now;
+  if (hitstop > 0) { hitstop -= dt; dt = 0; }
+  if (dt > 0) update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
