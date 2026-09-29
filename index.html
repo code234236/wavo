@@ -31,22 +31,21 @@
   .tbtn { position: absolute; width: 68px; height: 68px; border-radius: 50%; border: 2px solid rgba(255,255,255,.28);
     background: rgba(255,255,255,.08); color: #fff; font: 800 13px/1.1 inherit; font-family: inherit; touch-action: none; }
   .tbtn:active { background: rgba(92,208,255,.3); }
-  #b1 { left: 0; bottom: 0; } #b2 { right: 0; bottom: 0; } #b3 { left: 61px; top: 0; }
+  #tb { width: 96px; height: 96px; }
+  #b1 { inset: 0; width: 96px; height: 96px; font-size: 15px; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="hud"><div id="hpbar"><div id="hp"></div></div><div id="info"></div></div>
-<div id="move">WASD / 방향키 이동 · 마우스 조준</div>
+<div id="move">WASD / 방향키 이동 · 마우스 조준 · 좌클릭 연타로 3연격</div>
 <div id="keys">
-  <div class="k" id="k1"><b>1</b>베기</div>
-  <div class="k" id="k2"><b>2</b>반대 베기</div>
-  <div class="k" id="k3"><b>3</b>찌르기</div>
+  <div class="k" id="k1"><b>1타</b>베기</div>
+  <div class="k" id="k2"><b>2타</b>반대 베기</div>
+  <div class="k" id="k3"><b>3타</b>찌르기</div>
 </div>
 <div id="tb">
-  <button class="tbtn" id="b1">1<br>베기</button>
-  <button class="tbtn" id="b2">2<br>반대</button>
-  <button class="tbtn" id="b3">3<br>찌르기</button>
+  <button class="tbtn" id="b1">공격</button>
 </div>
 <div id="over"><h2>패배</h2><p id="overInfo"></p><p>R 키 또는 화면을 눌러 다시 시작</p></div>
 <script>
@@ -81,7 +80,7 @@ const lerpP = (p, q, t) => ({ s: lerp(p.s, q.s, t), a: lerp(p.a, q.a, t), d: ler
 
 function makeChar(o) {
   return Object.assign({ x: 0, y: 0, vx: 0, vy: 0, r: 18, L: 58, face: 0, hp: 100, maxHp: 100,
-    atk: null, queued: 0, cd: 0, flash: 0, inv: 0, trail: [], windMul: 1, dmgMul: 1 }, o);
+    atk: null, queued: 0, cd: 0, flash: 0, inv: 0, trail: [], lastK: 0, sinceAtk: 9, windMul: 1, dmgMul: 1 }, o);
 }
 
 let player, enemies, particles, texts, wave, kills, shake, hitstop, over;
@@ -127,13 +126,20 @@ function currentPose(c) {
 function startAttack(c, k) {
   c.atk = { k, t: 0, hit: new Set() };
   c.trail = [];
+  c.lastK = k; c.sinceAtk = 0;
+  if (c.isPlayer) pulse(k);
 }
-function tryAttack(c, k) {
-  if (!c.atk) { startAttack(c, k); return; }
+// 좌클릭 콤보: 베기 → 반대 베기 → 찌르기 → 다시 베기
+// 공격이 끝나고 COMBO_WINDOW 안에 다시 누르면 다음 타로 이어지고, 늦으면 1타부터
+const COMBO_WINDOW = .4;
+function comboAttack(c) {
+  if (c.queued) return;
+  const next = c.lastK % 3 + 1;
+  if (!c.atk) { startAttack(c, c.sinceAtk < COMBO_WINDOW ? next : 1); return; }
   const K = ATK[c.atk.k];
-  // 후딜레이 중이면 바로 다음 공격으로 캔슬, 아니면 예약
-  if (c.atk.t >= K.wind * c.windMul + K.strike) startAttack(c, k);
-  else c.queued = k;
+  // 후딜레이 중이면 바로 다음 타로 캔슬, 아니면 예약
+  if (c.atk.t >= K.wind * c.windMul + K.strike) startAttack(c, next);
+  else c.queued = next;
 }
 
 function segDist(px, py, ax, ay, bx, by) {
@@ -192,10 +198,8 @@ const A_HITSTOP = [.045, .07];
 // ---------- 입력 ----------
 const keys = {};
 const mouse = { x: 0, y: 0, used: false };
-const KEYMAP = { Digit1: 1, Numpad1: 1, Digit2: 2, Numpad2: 2, Digit3: 3, Numpad3: 3 };
 addEventListener('keydown', e => {
   keys[e.code] = true;
-  if (KEYMAP[e.code] && !e.repeat && !over) { tryAttack(player, KEYMAP[e.code]); pulse(KEYMAP[e.code]); }
   if (e.code === 'KeyR' && over) reset();
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
@@ -212,15 +216,14 @@ const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
 addEventListener('touchstart', () => document.body.classList.add('touch'), { once: true, passive: true });
 cv.addEventListener('pointerdown', e => {
   if (over) { reset(); return; }
-  if (e.pointerType === 'mouse') return;
+  if (e.pointerType === 'mouse') { if (e.button === 0) comboAttack(player); return; }
   if (joy.id === null) { joy.id = e.pointerId; joy.ox = joy.x = e.clientX; joy.oy = joy.y = e.clientY; }
 });
 cv.addEventListener('pointermove', e => { if (e.pointerId === joy.id) { joy.x = e.clientX; joy.y = e.clientY; } });
 const joyEnd = e => { if (e.pointerId === joy.id) joy.id = null; };
 cv.addEventListener('pointerup', joyEnd); cv.addEventListener('pointercancel', joyEnd);
-for (const k of [1, 2, 3]) {
-  document.getElementById('b' + k).addEventListener('pointerdown', e => { e.preventDefault(); if (!over) tryAttack(player, k); });
-}
+cv.addEventListener('contextmenu', e => e.preventDefault());
+document.getElementById('b1').addEventListener('pointerdown', e => { e.preventDefault(); if (!over) comboAttack(player); });
 document.getElementById('over').addEventListener('pointerdown', () => { if (over) reset(); });
 
 // ---------- 업데이트 ----------
@@ -291,6 +294,7 @@ function update(dt) {
 
   for (const c of all) {
     c.flash = Math.max(0, c.flash - dt); c.inv = Math.max(0, c.inv - dt);
+    if (!c.atk) c.sinceAtk += dt;
     for (const t of c.trail) t.age += dt;
     c.trail = c.trail.filter(t => t.age < .16);
   }
