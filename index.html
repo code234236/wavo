@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Wavo</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; overflow: hidden; touch-action: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #ui { position: fixed; top: 12px; left: 16px; color: #fff; font: 600 16px system-ui, sans-serif; pointer-events: none; }
+  #over { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column;
+          color: #fff; font: 700 28px system-ui, sans-serif; background: rgba(0,0,0,.6); gap: 12px; }
+  #over small { font-size: 16px; font-weight: 400; }
+  #atk { position: fixed; right: 24px; bottom: 24px; width: 84px; height: 84px; border-radius: 50%; border: 0;
+         background: rgba(255,255,255,.2); color: #fff; font: 700 16px system-ui; display: none; }
+  @media (pointer: coarse) { #atk { display: block; } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui"></div>
+<div id="over"><div>GAME OVER</div><small id="final"></small><small>클릭 / 탭 / R 로 다시 시작</small></div>
+<button id="atk">베기</button>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const ui = document.getElementById('ui'), over = document.getElementById('over');
+let W, H;
+function resize() { W = cv.width = innerWidth; H = cv.height = innerHeight; }
+addEventListener('resize', resize); resize();
+
+const keys = {};
+const mouse = { x: 0, y: 0 };
+let player, enemies, particles, score, spawnTimer, time, dead, slash;
+
+function reset() {
+  player = { x: W / 2, y: H / 2, r: 18, speed: 240, hp: 5, inv: 0, angle: 0, cd: 0 };
+  enemies = []; particles = []; score = 0; spawnTimer = 0; time = 0; dead = false; slash = null;
+  over.style.display = 'none';
+}
+
+// 입력
+addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ') attack();
+  if (dead && e.key.toLowerCase() === 'r') reset();
+});
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+cv.addEventListener('mousedown', e => { mouse.x = e.clientX; mouse.y = e.clientY; attack(); });
+over.addEventListener('click', reset);
+
+// 터치: 왼쪽 드래그 = 이동, 베기 버튼 = 공격
+let touch = null;
+cv.addEventListener('touchstart', e => {
+  const t = e.changedTouches[0];
+  if (dead) return reset();
+  touch = { id: t.identifier, sx: t.clientX, sy: t.clientY, dx: 0, dy: 0 };
+});
+cv.addEventListener('touchmove', e => {
+  for (const t of e.changedTouches) if (touch && t.identifier === touch.id) {
+    touch.dx = t.clientX - touch.sx; touch.dy = t.clientY - touch.sy;
+  }
+  e.preventDefault();
+}, { passive: false });
+cv.addEventListener('touchend', () => touch = null);
+document.getElementById('atk').addEventListener('touchstart', e => { e.preventDefault(); attack(); });
+
+function attack() {
+  if (dead || player.cd > 0) return;
+  player.cd = 0.3;
+  slash = { t: 0, dur: 0.15, angle: player.angle, range: 70, arc: Math.PI * 0.8 };
+  for (const en of enemies) {
+    const dx = en.x - player.x, dy = en.y - player.y;
+    const d = Math.hypot(dx, dy);
+    if (d > slash.range + en.r) continue;
+    let diff = Math.atan2(dy, dx) - slash.angle;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    if (Math.abs(diff) <= slash.arc / 2) {
+      en.hp--;
+      en.x += dx / d * 25; en.y += dy / d * 25;
+      burst(en.x, en.y, en.color, 6);
+    }
+  }
+}
+
+function spawn() {
+  const side = Math.random() * 4 | 0, m = 30;
+  const x = side === 0 ? -m : side === 1 ? W + m : Math.random() * W;
+  const y = side === 2 ? -m : side === 3 ? H + m : Math.random() * H;
+  const big = Math.random() < Math.min(0.1 + time / 120, 0.35);
+  enemies.push(big
+    ? { x, y, r: 22, speed: 70 + time, hp: 3, color: '#b44cff' }
+    : { x, y, r: 13, speed: 100 + time * 1.5, hp: 1, color: '#ff4c4c' });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 180;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.4, color });
+  }
+}
+
+function update(dt) {
+  if (dead) return;
+  time += dt;
+
+  // 이동
+  let mx = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
+  let my = (keys['s'] || keys['arrowdown'] ? 1 : 0) - (keys['w'] || keys['arrowup'] ? 1 : 0);
+  if (touch) {
+    const l = Math.hypot(touch.dx, touch.dy);
+    if (l > 8) { mx = touch.dx / Math.max(l, 50); my = touch.dy / Math.max(l, 50); }
+  }
+  const ml = Math.hypot(mx, my);
+  if (ml > 1) { mx /= ml; my /= ml; }
+  player.x = Math.max(player.r, Math.min(W - player.r, player.x + mx * player.speed * dt));
+  player.y = Math.max(player.r, Math.min(H - player.r, player.y + my * player.speed * dt));
+
+  // 조준: 터치면 이동 방향, 아니면 마우스
+  if (touch || matchMedia('(pointer: coarse)').matches) {
+    if (ml > 0.1) player.angle = Math.atan2(my, mx);
+  } else {
+    player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+  }
+
+  player.cd = Math.max(0, player.cd - dt);
+  player.inv = Math.max(0, player.inv - dt);
+  if (slash && (slash.t += dt) > slash.dur) slash = null;
+
+  // 스폰 (시간 지날수록 빨라짐)
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) { spawn(); spawnTimer = Math.max(0.25, 1.2 - time * 0.02); }
+
+  // 적
+  for (const en of enemies) {
+    const dx = player.x - en.x, dy = player.y - en.y, d = Math.hypot(dx, dy) || 1;
+    en.x += dx / d * en.speed * dt; en.y += dy / d * en.speed * dt;
+    if (d < en.r + player.r && player.inv <= 0) {
+      player.hp--; player.inv = 1;
+      burst(player.x, player.y, '#4cc3ff', 10);
+      if (player.hp <= 0) {
+        dead = true;
+        document.getElementById('final').textContent = `점수 ${score} · 생존 ${time.toFixed(1)}초`;
+        over.style.display = 'flex';
+      }
+    }
+  }
+  enemies = enemies.filter(en => {
+    if (en.hp > 0) return true;
+    score += en.r > 15 ? 3 : 1;
+    burst(en.x, en.y, en.color, 12);
+    return false;
+  });
+
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  particles = particles.filter(p => p.life > 0);
+}
+
+function circle(x, y, r, color) {
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+}
+
+function draw() {
+  ctx.fillStyle = '#1b1d23'; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#23262e'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+  for (const en of enemies) circle(en.x, en.y, en.r, en.color);
+  for (const p of particles) { ctx.globalAlpha = p.life / 0.4; circle(p.x, p.y, 3, p.color); }
+  ctx.globalAlpha = 1;
+
+  // 칼 휘두르기
+  if (slash) {
+    const k = slash.t / slash.dur;
+    const start = slash.angle - slash.arc / 2;
+    const cur = start + slash.arc * k;
+    ctx.fillStyle = `rgba(255,255,255,${0.35 * (1 - k)})`;
+    ctx.beginPath(); ctx.moveTo(player.x, player.y);
+    ctx.arc(player.x, player.y, slash.range, start, cur); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(player.x + Math.cos(cur) * player.r, player.y + Math.sin(cur) * player.r);
+    ctx.lineTo(player.x + Math.cos(cur) * slash.range, player.y + Math.sin(cur) * slash.range);
+    ctx.stroke();
+  } else {
+    // 들고 있는 칼
+    const a = player.angle;
+    ctx.strokeStyle = '#ccc'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(player.x + Math.cos(a) * player.r, player.y + Math.sin(a) * player.r);
+    ctx.lineTo(player.x + Math.cos(a) * (player.r + 26), player.y + Math.sin(a) * (player.r + 26));
+    ctx.stroke();
+  }
+
+  // 플레이어 (무적 중 깜빡임)
+  if (!(player.inv > 0 && Math.floor(player.inv * 10) % 2)) circle(player.x, player.y, player.r, '#4cc3ff');
+
+  ui.textContent = `HP ${'♥'.repeat(Math.max(0, player.hp))}   점수 ${score}   ${time.toFixed(1)}s`;
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
